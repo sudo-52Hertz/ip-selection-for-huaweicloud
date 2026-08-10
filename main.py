@@ -9,6 +9,7 @@
 - 为每个线路创建3个记录集，每个记录集包含50个IP
 - 支持中国移动、中国联通、中国电信、境外、默认五条线路
 - 使用华为云官方SDK进行API调用
+- 自动去重，避免重复IP导致记录集创建失败
 
 使用方法:
     1. 修改 config.py 中的配置项
@@ -20,7 +21,7 @@ import re
 import sys
 import time
 import requests
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Set
 
 from huaweicloudsdkcore.auth.credentials import BasicCredentials
 from huaweicloudsdkcore.exceptions import exceptions
@@ -73,6 +74,7 @@ def fetch_ip_list(url: str) -> List[str]:
 
     每行格式: IP地址 [注释内容]
     忽略空行和注释，只提取有效的IPv4地址
+    自动去重，保留首次出现的顺序
     """
     print(f"  正在获取: {url}")
     try:
@@ -84,6 +86,7 @@ def fetch_ip_list(url: str) -> List[str]:
         )
 
         ips = []
+        seen = set()
         for line in response.text.strip().split("\n"):
             line = line.strip()
             if not line or line.startswith("#"):
@@ -94,13 +97,67 @@ def fetch_ip_list(url: str) -> List[str]:
                 # 验证IP合法性
                 parts = ip.split(".")
                 if all(0 <= int(p) <= 255 for p in parts):
-                    ips.append(ip)
+                    if ip not in seen:
+                        seen.add(ip)
+                        ips.append(ip)
 
-        print(f"  成功获取 {len(ips)} 个有效IP")
+        print(f"  成功获取 {len(ips)} 个有效IP (已去重)")
         return ips
     except requests.RequestException as e:
         print(f"  [错误] 获取IP列表失败: {e}")
         return []
+
+
+def deduplicate_ips_across_recordsets(
+    chunks: List[List[str]],
+    line_key: str,
+    line_name: str,
+) -> List[List[str]]:
+    """
+    跨记录集去重
+
+    华为云会检测同一域名下所有记录集中的重复IP并拒绝创建。
+    此函数确保同一域名+同一类型下，所有记录集中的IP全局唯一。
+
+    去重策略:
+    1. 保留首次出现的IP
+    2. 后续记录集中若出现已使用过的IP，自动丢弃
+    3. 若去重后某记录集IP不足，尝试从后续IP补充
+
+    Args:
+        chunks: 分块后的IP列表
+        line_key: 线路标识
+        line_name: 线路中文名
+
+    Returns:
+        去重后的分块IP列表
+    """
+    global_seen: Set[str] = set()
+    result_chunks = []
+
+    for idx, chunk in enumerate(chunks):
+        unique_chunk = []
+        duplicates = []
+
+        for ip in chunk:
+            if ip in global_seen:
+                duplicates.append(ip)
+            else:
+                global_seen.add(ip)
+                unique_chunk.append(ip)
+
+        if duplicates:
+            print(f"    [去重] 记录集 {idx + 1} 丢弃 {len(duplicates)} 个重复IP: {duplicates[:5]}{'...' if len(duplicates) > 5 else ''}")
+
+        result_chunks.append(unique_chunk)
+
+    # 统计
+    total_before = sum(len(c) for c in chunks)
+    total_after = sum(len(c) for c in result_chunks)
+    if total_before != total_after:
+        print(f"    [去重汇总] 共丢弃 {total_before - total_after} 个重复IP")
+
+    return result_chunks
 
 
 def chunk_ips(ips: List[str], chunk_size: int) -> List[List[str]]:
@@ -187,7 +244,7 @@ def process_line(
     print(f"处理线路: {line_name} ({line_key}) -> 华为云线路ID: {line_id}")
     print(f"{'='*60}")
 
-    # 1. 获取IP列表
+    # 1. 获取IP列表（已去重）
     ips = fetch_ip_list(url)
 
     if len(ips) < IPS_PER_RECORDSET * RECORDSETS_PER_LINE:
@@ -205,10 +262,16 @@ def process_line(
     # 3. 分块
     chunks = chunk_ips(ips, IPS_PER_RECORDSET)
 
-    # 4. 创建记录集
+    # 4. 跨记录集去重（关键：避免同一域名下重复IP被拒绝）
+    print(f"  正在进行跨记录集去重...")
+    chunks = deduplicate_ips_across_recordsets(chunks, line_key, line_name)
+
+    # 5. 创建记录集
     all_success = True
     for idx, chunk in enumerate(chunks):
         if not chunk:
+            print(f"\n  [跳过] 记录集 {idx + 1} 去重后无可用IP")
+            all_success = False
             continue
 
         desc = f"{DESCRIPTION_PREFIX} | {line_name} | 记录集 {idx + 1}/{len(chunks)}"
