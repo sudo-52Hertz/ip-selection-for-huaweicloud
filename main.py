@@ -10,6 +10,7 @@
 - 支持中国移动、中国联通、中国电信、境外、默认五条线路
 - 使用华为云官方SDK进行API调用
 - 自动去重，避免重复IP导致记录集创建失败
+- 每次运行前先删除该域名+该类型+该线路的旧记录集，再创建新的
 
 使用方法:
     1. 修改 config.py 中的配置项
@@ -30,6 +31,8 @@ from huaweicloudsdkdns.v2.region.dns_region import DnsRegion
 from huaweicloudsdkdns.v2.model import (
     CreateRecordSetWithLineRequest,
     CreateRecordSetWithLineRequestBody,
+    ListRecordSetsByZoneRequest,
+    DeleteRecordSetRequest,
 )
 
 # 导入配置
@@ -182,6 +185,126 @@ def create_dns_client() -> DnsClient:
     return client
 
 
+def list_recordsets_by_zone(client: DnsClient, zone_id: str) -> List[dict]:
+    """
+    列出指定Zone下的所有记录集
+
+    Returns:
+        记录集列表，每个元素为包含 id, name, type, line, records 的字典
+    """
+    recordsets = []
+    marker = None
+
+    while True:
+        request = ListRecordSetsByZoneRequest()
+        request.zone_id = zone_id
+        request.limit = 500  # 每页最多500条
+        if marker:
+            request.marker = marker
+
+        try:
+            response = client.list_record_sets_by_zone(request)
+            for rs in response.recordsets:
+                recordsets.append({
+                    "id": rs.id,
+                    "name": rs.name,
+                    "type": rs.type,
+                    "line": rs.line,
+                    "records": rs.records,
+                    "description": getattr(rs, "description", ""),
+                })
+
+            # 分页处理
+            if not response.links or not response.links.next:
+                break
+            # 从next链接中提取marker
+            next_link = response.links.next
+            if "marker=" in next_link:
+                marker = next_link.split("marker=")[1].split("&")[0]
+            else:
+                break
+        except exceptions.ClientRequestException as e:
+            print(f"  [错误] 获取记录集列表失败: [{e.status_code}] {e.error_msg}")
+            break
+        except Exception as e:
+            print(f"  [错误] 获取记录集列表异常: {e}")
+            break
+
+    return recordsets
+
+
+def delete_recordset(client: DnsClient, zone_id: str, recordset_id: str) -> Tuple[bool, str]:
+    """
+    删除指定记录集
+
+    Returns:
+        (success: bool, message: str)
+    """
+    request = DeleteRecordSetRequest()
+    request.zone_id = zone_id
+    request.recordset_id = recordset_id
+
+    try:
+        client.delete_record_set(request)
+        return True, "删除成功"
+    except exceptions.ClientRequestException as e:
+        return False, f"API错误 [{e.status_code}] {e.error_code}: {e.error_msg}"
+    except Exception as e:
+        return False, f"异常: {str(e)}"
+
+
+def cleanup_old_recordsets(
+    client: DnsClient,
+    zone_id: str,
+    fqdn: str,
+    record_type: str,
+    line_id: str,
+) -> int:
+    """
+    清理指定域名+类型+线路的旧记录集
+
+    匹配规则:
+    - name 等于目标FQDN
+    - type 等于目标记录类型 (A)
+    - line 等于目标线路ID
+
+    Returns:
+        删除的记录集数量
+    """
+    print(f"  正在清理旧记录集...")
+
+    # 获取所有记录集
+    all_recordsets = list_recordsets_by_zone(client, zone_id)
+
+    # 筛选需要删除的记录集
+    to_delete = []
+    for rs in all_recordsets:
+        if (rs["name"] == fqdn and 
+            rs["type"] == record_type and 
+            rs["line"] == line_id):
+            to_delete.append(rs)
+
+    if not to_delete:
+        print(f"  未发现需要清理的旧记录集")
+        return 0
+
+    print(f"  发现 {len(to_delete)} 个旧记录集，准备删除...")
+
+    deleted_count = 0
+    for rs in to_delete:
+        print(f"    删除记录集: {rs['id']} ({rs['name']} | {rs['line']} | {len(rs.get('records', []))} 个IP)")
+        success, msg = delete_recordset(client, zone_id, rs["id"])
+        if success:
+            deleted_count += 1
+            print(f"      [成功] 已删除")
+        else:
+            print(f"      [失败] {msg}")
+        time.sleep(0.3)  # 删除操作也加间隔
+
+    print(f"  清理完成: 成功删除 {deleted_count}/{len(to_delete)} 个旧记录集")
+    return deleted_count
+
+
 def create_recordset(
     client: DnsClient,
     zone_id: str,
@@ -230,6 +353,12 @@ def process_line(
     """
     处理单个线路的解析记录创建
 
+    流程:
+    1. 清理该线路的旧记录集
+    2. 获取新IP列表
+    3. 分块并去重
+    4. 创建新记录集
+
     Args:
         line_key: 线路标识 (cmcc/cucc/ctcc/oversea/default)
         line_name: 线路中文名
@@ -244,7 +373,16 @@ def process_line(
     print(f"处理线路: {line_name} ({line_key}) -> 华为云线路ID: {line_id}")
     print(f"{'='*60}")
 
-    # 1. 获取IP列表（已去重）
+    # ========== 第1步: 清理旧记录集 ==========
+    cleanup_old_recordsets(
+        client=client,
+        zone_id=ZONE_ID,
+        fqdn=fqdn,
+        record_type=RECORD_TYPE,
+        line_id=line_id,
+    )
+
+    # ========== 第2步: 获取IP列表（已去重） ==========
     ips = fetch_ip_list(url)
 
     if len(ips) < IPS_PER_RECORDSET * RECORDSETS_PER_LINE:
@@ -254,19 +392,18 @@ def process_line(
             print(f"  [错误] 未获取到任何IP，跳过此线路")
             return False
 
-    # 2. 截取所需数量的IP
+    # 截取所需数量的IP
     needed_ips = IPS_PER_RECORDSET * RECORDSETS_PER_LINE
     ips = ips[:needed_ips]
     print(f"  将使用 {len(ips)} 个IP创建 {RECORDSETS_PER_LINE} 个记录集")
 
-    # 3. 分块
+    # ========== 第3步: 分块 + 跨记录集去重 ==========
     chunks = chunk_ips(ips, IPS_PER_RECORDSET)
 
-    # 4. 跨记录集去重（关键：避免同一域名下重复IP被拒绝）
     print(f"  正在进行跨记录集去重...")
     chunks = deduplicate_ips_across_recordsets(chunks, line_key, line_name)
 
-    # 5. 创建记录集
+    # ========== 第4步: 创建新记录集 ==========
     all_success = True
     for idx, chunk in enumerate(chunks):
         if not chunk:
@@ -321,6 +458,7 @@ def main():
     print(f"TTL: {TTL}秒")
     print(f"每个线路记录集数: {RECORDSETS_PER_LINE}")
     print(f"每个记录集IP数: {IPS_PER_RECORDSET}")
+    print(f"\n⚠️  注意: 每次运行会先删除该域名+该类型+该线路的旧记录集，再创建新的")
 
     # 线路名称映射
     line_names = {
