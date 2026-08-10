@@ -31,7 +31,7 @@ from huaweicloudsdkdns.v2.region.dns_region import DnsRegion
 from huaweicloudsdkdns.v2.model import (
     CreateRecordSetWithLineRequest,
     CreateRecordSetWithLineRequestBody,
-    ListRecordSetsByZoneRequest,
+    ListRecordSetsWithLineRequest,
     DeleteRecordSetRequest,
 )
 
@@ -185,37 +185,41 @@ def create_dns_client() -> DnsClient:
     return client
 
 
-def list_recordsets_by_zone(client: DnsClient, zone_id: str) -> List[dict]:
+def list_recordsets_with_line(client: DnsClient, zone_id: str) -> List[dict]:
     """
-    列出指定Zone下的所有记录集
+    使用 v2.1 ListRecordSetsWithLine API 列出带线路信息的记录集
+
+    此API返回的记录集包含 line 属性，可用于精确匹配线路
 
     Returns:
-        记录集列表，每个元素为包含 id, name, type, line, records 的字典
+        记录集列表，每个元素为包含 id, name, type, line, records, description 的字典
     """
     recordsets = []
     marker = None
 
     while True:
-        request = ListRecordSetsByZoneRequest()
+        request = ListRecordSetsWithLineRequest()
         request.zone_id = zone_id
         request.limit = 500  # 每页最多500条
         if marker:
             request.marker = marker
 
         try:
-            response = client.list_record_sets_by_zone(request)
+            response = client.list_record_sets_with_line(request)
             for rs in response.recordsets:
+                # 安全获取 line 属性，部分记录集可能没有 line（如SOA/NS）
+                line = getattr(rs, "line", None)
                 recordsets.append({
                     "id": rs.id,
                     "name": rs.name,
                     "type": rs.type,
-                    "line": rs.line,
-                    "records": rs.records,
+                    "line": line,
+                    "records": getattr(rs, "records", []),
                     "description": getattr(rs, "description", ""),
                 })
 
             # 分页处理
-            if not response.links or not response.links.next:
+            if not response.links or not getattr(response.links, "next", None):
                 break
             # 从next链接中提取marker
             next_link = response.links.next
@@ -273,8 +277,8 @@ def cleanup_old_recordsets(
     """
     print(f"  正在清理旧记录集...")
 
-    # 获取所有记录集
-    all_recordsets = list_recordsets_by_zone(client, zone_id)
+    # 使用 v2.1 API 获取带线路信息的记录集
+    all_recordsets = list_recordsets_with_line(client, zone_id)
 
     # 筛选需要删除的记录集
     to_delete = []
@@ -292,7 +296,8 @@ def cleanup_old_recordsets(
 
     deleted_count = 0
     for rs in to_delete:
-        print(f"    删除记录集: {rs['id']} ({rs['name']} | {rs['line']} | {len(rs.get('records', []))} 个IP)")
+        ip_count = len(rs.get("records", []))
+        print(f"    删除记录集: {rs['id']} ({rs['name']} | 线路:{rs['line']} | {ip_count} 个IP)")
         success, msg = delete_recordset(client, zone_id, rs["id"])
         if success:
             deleted_count += 1
