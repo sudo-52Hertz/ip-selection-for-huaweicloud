@@ -1,74 +1,95 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-华为云国际站智能DNS解析 - 统一配置文件
-⚠️ 只需修改本文件，无需改动主程序
+华为云DNS智能解析分流配置
+所有需要修改的配置项都集中在此文件中
+=====================================
+修改此文件后，运行 main.py 即可生效
 """
 
-# ==================== 华为云认证配置 ====================
-# 华为云国际站 Access Key ID
-HW_ACCESS_KEY = "your-access-key-id"
+# ============================================
+# 1. 华为云API认证信息
+# ============================================
+# 华为云国际站 Access Key (AK)
+# 在华为云控制台 "我的凭证" -> "访问密钥" 中创建
+HUAWEI_AK = "YOUR_ACCESS_KEY_HERE"
 
-# 华为云国际站 Secret Access Key
-HW_SECRET_KEY = "your-secret-access-key"
+# 华为云国际站 Secret Key (SK)
+HUAWEI_SK = "YOUR_SECRET_KEY_HERE"
 
-# 华为云国际站区域代码
-# 常用国际站区域: ap-southeast-1(新加坡), ap-southeast-3(曼谷), ap-south-1(孟买) 等
-# DNS 为全局服务，但 API 调用需指定一个区域端点
-HW_REGION = "ap-southeast-1"
+# 区域 (Region)
+# 华为云国际站常用区域: ap-southeast-1(新加坡), ap-southeast-3(曼谷), 
+#                      ap-southeast-4(雅加达), af-south-1(约翰内斯堡) 等
+# 请根据您的域名所在区域填写
+HUAWEI_REGION = "ap-southeast-1"
 
-# 项目 ID (Project ID)
-# 在华为云控制台 "My Credentials / 我的凭证" 中获取；国际站部分区域可留空
-HW_PROJECT_ID = ""
+# ============================================
+# 2. 域名与主机记录配置
+# ============================================
+# 域名ID (Zone ID)
+# 在华为云DNS控制台 -> 域名列表中查看
+ZONE_ID = "YOUR_ZONE_ID_HERE"
 
+# 域名名称 (必须以点号结尾的FQDN格式)
+# 例如: "example.com."
+ZONE_NAME = "example.com."
 
-# ==================== DNS 解析配置 ====================
-# 用于解析的域名 (不要带末尾的点，例如: example.com)
-DOMAIN = "example.com"
+# 主机记录 (子域名前缀)
+# 例如: "www" 表示 www.example.com
+#       "" 或 "@" 表示主域名 example.com
+#       "api" 表示 api.example.com
+HOST_RECORD = "www"
 
-# 主机记录
-# 例如填 "cdn" 将解析为 cdn.example.com
-# 填 "@" 或留空字符串表示主域名 example.com
-HOST_RECORD = "cdn"
+# ============================================
+# 3. 解析线路IP列表URL配置
+# ============================================
+# 每个线路的IP列表通过网页API获取，格式为纯文本，一行一个IP
+# 每行格式: IP地址 [注释内容]  (注释会被自动忽略)
+# 每个URL应返回至少150个有效IP地址
 
-# TTL 时间 (秒)，固定 60
+IP_LIST_URLS = {
+    # 中国移动线路
+    "cmcc": "https://your-api.example.com/ips/cmcc.txt",
+    # 中国联通线路
+    "cucc": "https://your-api.example.com/ips/cucc.txt",
+    # 中国电信线路
+    "ctcc": "https://your-api.example.com/ips/ctcc.txt",
+    # 境外线路
+    "oversea": "https://your-api.example.com/ips/oversea.txt",
+    # 默认线路 (全网默认，兜底)
+    "default": "https://your-api.example.com/ips/default.txt",
+}
+
+# ============================================
+# 4. 解析线路ID映射 (华为云DNS线路标识)
+# ============================================
+# 华为云DNS线路ID对照表:
+#   Yidong    -> 中国移动
+#   Liantong  -> 中国联通
+#   Dianxin   -> 中国电信
+#   Abroad    -> 境外
+#   default_view -> 全网默认
+LINE_IDS = {
+    "cmcc": "Yidong",       # 中国移动
+    "cucc": "Liantong",     # 中国联通
+    "ctcc": "Dianxin",      # 中国电信
+    "oversea": "Abroad",    # 境外
+    "default": "default_view",  # 全网默认
+}
+
+# ============================================
+# 5. 解析记录参数配置
+# ============================================
+# TTL时间 (秒)，全部设定为60秒
 TTL = 60
 
-# 每个记录集包含的 IP 数量 (华为云 A 记录单个记录集上限 50 个)
-IPS_PER_RECORDSET = 50
+# 解析记录类型 (A记录)
+RECORD_TYPE = "A"
 
-# 每个线路创建的记录集数量 (3 个记录集 × 50 IP = 150 IP)
+# 每个线路下的记录集数量
 RECORDSETS_PER_LINE = 3
 
+# 每个记录集包含的IP数量
+IPS_PER_RECORDSET = 50
 
-# ==================== 线路 IP 列表配置 ====================
-# 各线路的 IP 列表 URL
-# 要求: 纯文本，一行一个 IP，# 后面为注释（脚本会自动忽略注释）
-# line 字段说明:
-#   CMCC   -> 中国移动
-#   CUCC   -> 中国联通
-#   CTCC   -> 中国电信
-#   ABROAD -> 境外
-#   DEFAULT-> 默认
-LINE_CONFIG = {
-    "CMCC": {
-        "name": "中国移动",
-        "url": "https://your-api-server.com/ips/cmcc.txt"
-    },
-    "CUCC": {
-        "name": "中国联通",
-        "url": "https://your-api-server.com/ips/cucc.txt"
-    },
-    "CTCC": {
-        "name": "中国电信",
-        "url": "https://your-api-server.com/ips/ctcc.txt"
-    },
-    "ABROAD": {
-        "name": "境外",
-        "url": "https://your-api-server.com/ips/abroad.txt"
-    },
-    "DEFAULT": {
-        "name": "默认",
-        "url": "https://your-api-server.com/ips/default.txt"
-    }
-}
+# 记录集描述前缀
+DESCRIPTION_PREFIX = "Auto-created by script"
