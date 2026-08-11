@@ -40,23 +40,23 @@ ZONE_NAME = "example.com."
 HOST_RECORD = "www"
 
 # ============================================
-# 3. 解析线路IP列表URL配置
+# 3. 解析线路IP列表文件路径配置
 # ============================================
-# 每个线路的IP列表通过网页API获取，格式为纯文本，一行一个IP
-# 每行格式: IP地址 [注释内容]  (注释会被自动忽略)
-# 每个URL应返回至少150个有效IP地址
+# 每个线路的IP列表存储在本地文本文件中
+# 文件格式: 一行一个IP，IP后面可以有注释（会被自动忽略）
+# 每个文件中的IP数量不固定，脚本会自动按50个IP分块创建记录集
 
-IP_LIST_URLS = {
+IP_LIST_FILES = {
     # 中国移动线路
-    "cmcc": "https://your-api.example.com/ips/cmcc.txt",
+    "cmcc": "/path/to/cmcc_ips.txt",
     # 中国联通线路
-    "cucc": "https://your-api.example.com/ips/cucc.txt",
+    "cucc": "/path/to/cucc_ips.txt",
     # 中国电信线路
-    "ctcc": "https://your-api.example.com/ips/ctcc.txt",
+    "ctcc": "/path/to/ctcc_ips.txt",
     # 境外线路
-    "oversea": "https://your-api.example.com/ips/oversea.txt",
+    "oversea": "/path/to/oversea_ips.txt",
     # 默认线路 (全网默认，兜底)
-    "default": "https://your-api.example.com/ips/default.txt",
+    "default": "/path/to/default_ips.txt",
 }
 
 # ============================================
@@ -84,9 +84,6 @@ TTL = 60
 
 # 解析记录类型 (A记录)
 RECORD_TYPE = "A"
-
-# 每个线路下的记录集数量
-RECORDSETS_PER_LINE = 3
 
 # 每个记录集包含的IP数量
 IPS_PER_RECORDSET = 50
