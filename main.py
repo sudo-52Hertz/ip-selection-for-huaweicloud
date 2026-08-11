@@ -276,6 +276,8 @@ def delete_recordset(client: DnsClient, zone_id: str, recordset_id: str) -> Tupl
     """
     删除指定记录集
 
+    如果记录集已不存在（404），视为删除成功，避免重复删除报错。
+
     Returns:
         (success: bool, message: str)
     """
@@ -287,6 +289,9 @@ def delete_recordset(client: DnsClient, zone_id: str, recordset_id: str) -> Tupl
         client.delete_record_set(request)
         return True, "删除成功"
     except exceptions.ClientRequestException as e:
+        # 记录集已不存在，视为删除成功（可能已被其他进程删除或之前删除成功但响应丢失）
+        if e.status_code == 404 and "DNS.0313" in str(e.error_code):
+            return True, "记录集已不存在，视为删除成功"
         return False, f"API错误 [{e.status_code}] {e.error_code}: {e.error_msg}"
     except Exception as e:
         return False, f"异常: {str(e)}"
