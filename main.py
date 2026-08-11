@@ -5,12 +5,12 @@
 通过华为云国际站API，为不同运营商线路创建A记录解析，实现IP分流。
 
 功能:
-- 从网页API获取各线路IP列表（支持自动重试）
-- 为每个线路创建3个记录集，每个记录集包含50个IP
+- 从本地文本文件读取各线路IP列表
+- 每个记录集包含50个IP，根据IP总数动态创建记录集数量
 - 支持中国移动、中国联通、中国电信、境外、默认五条线路
 - 使用华为云官方SDK进行API调用
 - 自动去重，避免重复IP导致记录集创建失败
-- 获取IP成功后才会删除旧记录集并创建新的，失败则跳过该线路
+- 获取IP成功后才会删除旧记录集并创建新的，失败则保留现有记录集
 
 使用方法:
     1. 修改 config.py 中的配置项
@@ -21,8 +21,7 @@
 import re
 import sys
 import time
-import requests
-from typing import List, Dict, Tuple, Set
+from typing import List, Tuple, Set
 
 from huaweicloudsdkcore.auth.credentials import BasicCredentials
 from huaweicloudsdkcore.exceptions import exceptions
@@ -32,25 +31,18 @@ from huaweicloudsdkdns.v2.model import (
     CreateRecordSetWithLineRequest,
     CreateRecordSetWithLineRequestBody,
     ListRecordSetsWithLineRequest,
-    DeleteRecordSetRequest,
+    DeleteRecordSetsRequest,
 )
 
 # 导入配置
 from config import (
     HUAWEI_AK, HUAWEI_SK, HUAWEI_REGION,
     ZONE_ID, ZONE_NAME, HOST_RECORD,
-    IP_LIST_URLS, LINE_IDS,
+    IP_LIST_FILES, LINE_IDS,
     TTL, RECORD_TYPE,
-    RECORDSETS_PER_LINE, IPS_PER_RECORDSET,
+    IPS_PER_RECORDSET,
     DESCRIPTION_PREFIX,
 )
-
-# ============================================
-# 可调整的重试配置
-# ============================================
-FETCH_RETRY_TIMES = 3       # 获取IP失败时的重试次数
-FETCH_RETRY_DELAY = 2       # 每次重试间隔（秒）
-FETCH_TIMEOUT = 30          # 单次请求超时时间（秒）
 
 
 def validate_config() -> bool:
@@ -66,9 +58,9 @@ def validate_config() -> bool:
     if not ZONE_NAME or not ZONE_NAME.endswith("."):
         errors.append("ZONE_NAME 必须以点号(.)结尾")
 
-    for line_key, url in IP_LIST_URLS.items():
-        if "your-api.example.com" in url or not url:
-            errors.append(f"IP_LIST_URLS['{line_key}'] 未配置有效URL")
+    for line_key, path in IP_LIST_FILES.items():
+        if not path or "/path/to/" in path:
+            errors.append(f"IP_LIST_FILES['{line_key}'] 未配置有效文件路径")
 
     if errors:
         print("[错误] 配置验证失败，请检查 config.py:")
@@ -78,84 +70,56 @@ def validate_config() -> bool:
     return True
 
 
-def fetch_ip_list_once(url: str) -> Tuple[bool, List[str]]:
+def read_ip_list(file_path: str, line_name: str = "") -> List[str]:
     """
-    单次从URL获取IP列表
-
-    Returns:
-        (success: bool, ips: List[str])
-    """
-    try:
-        response = requests.get(url, timeout=FETCH_TIMEOUT)
-        response.raise_for_status()
-
-        ip_pattern = re.compile(
-            r"^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})"
-        )
-
-        ips = []
-        seen = set()
-        for line in response.text.strip().split("\n"):
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            match = ip_pattern.match(line)
-            if match:
-                ip = match.group(1)
-                parts = ip.split(".")
-                if all(0 <= int(p) <= 255 for p in parts):
-                    if ip not in seen:
-                        seen.add(ip)
-                        ips.append(ip)
-
-        return True, ips
-    except requests.RequestException as e:
-        return False, []
-    except Exception as e:
-        return False, []
-
-
-def fetch_ip_list(url: str, line_name: str = "") -> List[str]:
-    """
-    从URL获取IP列表，支持自动重试
+    从本地文件读取IP列表
 
     每行格式: IP地址 [注释内容]
     忽略空行和注释，只提取有效的IPv4地址
     自动去重，保留首次出现的顺序
 
-    如果所有重试都失败，返回空列表，调用方应跳过该线路
-
     Args:
-        url: IP列表URL
+        file_path: IP列表文件路径
         line_name: 线路名称（用于日志输出）
 
     Returns:
         IP列表，失败时返回空列表
     """
     prefix = f"[{line_name}] " if line_name else ""
-    print(f"  {prefix}正在获取: {url}")
+    print(f"  {prefix}正在读取: {file_path}")
 
-    for attempt in range(1, FETCH_RETRY_TIMES + 1):
-        success, ips = fetch_ip_list_once(url)
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except FileNotFoundError:
+        print(f"  {prefix}[错误] 文件不存在: {file_path}")
+        return []
+    except Exception as e:
+        print(f"  {prefix}[错误] 读取文件失败: {e}")
+        return []
 
-        if success:
-            print(f"  {prefix}成功获取 {len(ips)} 个有效IP (已去重)")
-            return ips
+    ip_pattern = re.compile(r"^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})")
 
-        if attempt < FETCH_RETRY_TIMES:
-            print(f"  {prefix}[重试 {attempt}/{FETCH_RETRY_TIMES}] 获取失败，{FETCH_RETRY_DELAY}秒后重试...")
-            time.sleep(FETCH_RETRY_DELAY)
-        else:
-            print(f"  {prefix}[错误] 获取IP列表失败，已重试 {FETCH_RETRY_TIMES} 次，跳过此线路")
+    ips = []
+    seen = set()
+    for line in content.strip().split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = ip_pattern.match(line)
+        if match:
+            ip = match.group(1)
+            parts = ip.split(".")
+            if all(0 <= int(p) <= 255 for p in parts):
+                if ip not in seen:
+                    seen.add(ip)
+                    ips.append(ip)
 
-    return []
+    print(f"  {prefix}成功读取 {len(ips)} 个有效IP (已去重)")
+    return ips
 
 
-def deduplicate_ips_across_recordsets(
-    chunks: List[List[str]],
-    line_key: str,
-    line_name: str,
-) -> List[List[str]]:
+def deduplicate_ips_across_recordsets(chunks: List[List[str]]) -> List[List[str]]:
     """
     跨记录集去重
 
@@ -168,8 +132,6 @@ def deduplicate_ips_across_recordsets(
 
     Args:
         chunks: 分块后的IP列表
-        line_key: 线路标识
-        line_name: 线路中文名
 
     Returns:
         去重后的分块IP列表
@@ -189,7 +151,7 @@ def deduplicate_ips_across_recordsets(
                 unique_chunk.append(ip)
 
         if duplicates:
-            print(f"    [去重] 记录集 {idx + 1} 丢弃 {len(duplicates)} 个重复IP: {duplicates[:5]}{'...' if len(duplicates) > 5 else ''}")
+            print(f"    [去重] 记录集 {idx + 1} 丢弃 {len(duplicates)} 个重复IP")
 
         result_chunks.append(unique_chunk)
 
@@ -227,10 +189,8 @@ def list_recordsets_with_line(client: DnsClient, zone_id: str) -> List[dict]:
     """
     使用 v2.1 ListRecordSetsWithLine API 列出带线路信息的记录集
 
-    此API返回的记录集包含 line 属性，可用于精确匹配线路
-
     Returns:
-        记录集列表，每个元素为包含 id, name, type, line, records, description 的字典
+        记录集列表
     """
     recordsets = []
     marker = None
@@ -274,16 +234,11 @@ def list_recordsets_with_line(client: DnsClient, zone_id: str) -> List[dict]:
 
 def delete_recordset(client: DnsClient, zone_id: str, recordset_id: str) -> Tuple[bool, str]:
     """
-    删除指定记录集
-
-    使用 v2.1 API (DeleteRecordSets) 删除带线路的记录集，
-    因为 v2 API (DeleteRecordSet) 可能无法正确删除带线路的记录集。
+    删除指定记录集（使用 v2.1 API）
 
     Returns:
         (success: bool, message: str)
     """
-    # 使用 v2.1 的 DeleteRecordSetsRequest
-    from huaweicloudsdkdns.v2.model import DeleteRecordSetsRequest
     request = DeleteRecordSetsRequest()
     request.zone_id = zone_id
     request.recordset_id = recordset_id
@@ -314,7 +269,6 @@ def cleanup_old_recordsets(
 
     all_recordsets = list_recordsets_with_line(client, zone_id)
 
-    # 筛选需要删除的记录集
     to_delete = []
     for rs in all_recordsets:
         if (rs["name"] == fqdn and 
@@ -386,28 +340,24 @@ def process_line(
     line_key: str,
     line_name: str,
     line_id: str,
-    url: str,
+    file_path: str,
     fqdn: str,
 ) -> bool:
     """
     处理单个线路的解析记录创建
 
     流程:
-    1. 获取新IP列表（带重试，失败则直接跳过该线路，不删除旧记录集）
-    2. 检查IP数量是否足够
+    1. 从本地文件读取IP列表
+    2. 检查IP数量是否足够（至少1个）
     3. 清理旧记录集
     4. 分块并去重
-    5. 创建新记录集
-
-    关键安全逻辑:
-    - 只有IP获取成功且数量足够时，才会执行删除+创建
-    - 如果IP获取失败，该线路的旧记录集会保留，避免服务中断
+    5. 创建新记录集（动态计算记录集数量）
 
     Args:
         line_key: 线路标识
         line_name: 线路中文名
         line_id: 华为云线路ID
-        url: IP列表URL
+        file_path: IP列表文件路径
         fqdn: 完整域名
 
     Returns:
@@ -417,26 +367,19 @@ def process_line(
     print(f"处理线路: {line_name} ({line_key}) -> 华为云线路ID: {line_id}")
     print(f"{'='*60}")
 
-    # ========== 第1步: 获取IP列表（带重试）==========
-    # 必须先成功获取IP，才能继续后续操作
-    ips = fetch_ip_list(url, line_name)
+    # ========== 第1步: 读取IP列表 ==========
+    ips = read_ip_list(file_path, line_name)
 
-    # 如果IP获取失败，直接跳过该线路，不删除旧记录集
     if not ips:
-        print(f"  [跳过] {line_name} 线路IP获取失败，保留现有记录集不变")
+        print(f"  [跳过] {line_name} 线路未读取到任何IP，保留现有记录集不变")
         return False
 
-    # 检查IP数量
-    min_required = IPS_PER_RECORDSET * RECORDSETS_PER_LINE
-    if len(ips) < min_required:
-        print(f"  [警告] IP数量不足: 需要 {min_required} 个，实际获取 {len(ips)} 个")
-        print(f"  [继续] 将使用全部可用IP继续创建记录集")
+    # 计算记录集数量
+    total_ips = len(ips)
+    recordset_count = (total_ips + IPS_PER_RECORDSET - 1) // IPS_PER_RECORDSET  # 向上取整
+    print(f"  共 {total_ips} 个IP，将创建 {recordset_count} 个记录集（每个最多 {IPS_PER_RECORDSET} 个IP）")
 
-    # 截取所需数量的IP（如果不足则全部使用）
-    ips = ips[:min_required]
-    print(f"  将使用 {len(ips)} 个IP创建 {RECORDSETS_PER_LINE} 个记录集")
-
-    # ========== 第2步: 清理旧记录集（仅在IP获取成功后执行）==========
+    # ========== 第2步: 清理旧记录集 ==========
     cleanup_old_recordsets(
         client=client,
         zone_id=ZONE_ID,
@@ -449,17 +392,19 @@ def process_line(
     chunks = chunk_ips(ips, IPS_PER_RECORDSET)
 
     print(f"  正在进行跨记录集去重...")
-    chunks = deduplicate_ips_across_recordsets(chunks, line_key, line_name)
+    chunks = deduplicate_ips_across_recordsets(chunks)
 
     # ========== 第4步: 创建新记录集 ==========
     all_success = True
+    actual_recordsets = 0
     for idx, chunk in enumerate(chunks):
         if not chunk:
             print(f"\n  [跳过] 记录集 {idx + 1} 去重后无可用IP")
             all_success = False
             continue
 
-        desc = f"{DESCRIPTION_PREFIX} | {line_name} | 记录集 {idx + 1}/{len(chunks)}"
+        actual_recordsets += 1
+        desc = f"{DESCRIPTION_PREFIX} | {line_name} | 记录集 {idx + 1}/{len(chunks)} ({len(chunk)} 个IP)"
         print(f"\n  创建记录集 {idx + 1}/{len(chunks)} ({len(chunk)} 个IP)...")
         print(f"    域名: {fqdn}")
         print(f"    线路: {line_id}")
@@ -484,6 +429,7 @@ def process_line(
 
         time.sleep(0.5)
 
+    print(f"\n  线路 {line_name} 处理完成: 成功创建 {actual_recordsets} 个记录集")
     return all_success
 
 
@@ -503,11 +449,8 @@ def main():
     print(f"Zone ID: {ZONE_ID}")
     print(f"Region: {HUAWEI_REGION}")
     print(f"TTL: {TTL}秒")
-    print(f"每个线路记录集数: {RECORDSETS_PER_LINE}")
     print(f"每个记录集IP数: {IPS_PER_RECORDSET}")
-    print(f"IP获取重试次数: {FETCH_RETRY_TIMES} 次")
-    print(f"IP获取重试间隔: {FETCH_RETRY_DELAY} 秒")
-    print(f"\n⚠️  安全策略: 只有IP获取成功才会删除旧记录集，失败则保留现有记录集")
+    print(f"\n⚠️  安全策略: 只有IP读取成功才会删除旧记录集，失败则保留现有记录集")
 
     line_names = {
         "cmcc": "中国移动",
@@ -528,7 +471,7 @@ def main():
     results = {}
     for line_key in ["cmcc", "cucc", "ctcc", "oversea", "default"]:
         line_id = LINE_IDS[line_key]
-        url = IP_LIST_URLS[line_key]
+        file_path = IP_LIST_FILES[line_key]
         name = line_names[line_key]
 
         success = process_line(
@@ -536,7 +479,7 @@ def main():
             line_key=line_key,
             line_name=name,
             line_id=line_id,
-            url=url,
+            file_path=file_path,
             fqdn=fqdn,
         )
         results[line_key] = success
@@ -553,7 +496,7 @@ def main():
     print(f"\n总计: {passed}/{total} 条线路处理成功")
 
     if passed < total:
-        print("\n[提示] 部分线路因IP获取失败被跳过，现有记录集已保留，服务未中断")
+        print("\n[提示] 部分线路因IP读取失败被跳过，现有记录集已保留，服务未中断")
         sys.exit(1)
     print("\n全部完成!")
 
