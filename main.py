@@ -276,22 +276,22 @@ def delete_recordset(client: DnsClient, zone_id: str, recordset_id: str) -> Tupl
     """
     删除指定记录集
 
-    如果记录集已不存在（404），视为删除成功，避免重复删除报错。
+    使用 v2.1 API (DeleteRecordSets) 删除带线路的记录集，
+    因为 v2 API (DeleteRecordSet) 可能无法正确删除带线路的记录集。
 
     Returns:
         (success: bool, message: str)
     """
-    request = DeleteRecordSetRequest()
+    # 使用 v2.1 的 DeleteRecordSetsRequest
+    from huaweicloudsdkdns.v2.model import DeleteRecordSetsRequest
+    request = DeleteRecordSetsRequest()
     request.zone_id = zone_id
     request.recordset_id = recordset_id
 
     try:
-        client.delete_record_set(request)
-        return True, "删除成功"
+        response = client.delete_record_sets(request)
+        return True, f"删除成功 (status: {getattr(response, 'status', 'unknown')})"
     except exceptions.ClientRequestException as e:
-        # 记录集已不存在，视为删除成功（可能已被其他进程删除或之前删除成功但响应丢失）
-        if e.status_code == 404 and "DNS.0313" in str(e.error_code):
-            return True, "记录集已不存在，视为删除成功"
         return False, f"API错误 [{e.status_code}] {e.error_code}: {e.error_msg}"
     except Exception as e:
         return False, f"异常: {str(e)}"
@@ -314,6 +314,7 @@ def cleanup_old_recordsets(
 
     all_recordsets = list_recordsets_with_line(client, zone_id)
 
+    # 筛选需要删除的记录集
     to_delete = []
     for rs in all_recordsets:
         if (rs["name"] == fqdn and 
@@ -334,7 +335,7 @@ def cleanup_old_recordsets(
         success, msg = delete_recordset(client, zone_id, rs["id"])
         if success:
             deleted_count += 1
-            print(f"      [成功] 已删除")
+            print(f"      [成功] {msg}")
         else:
             print(f"      [失败] {msg}")
         time.sleep(0.3)
