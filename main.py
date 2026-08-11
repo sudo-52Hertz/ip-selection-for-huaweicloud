@@ -60,7 +60,7 @@ def validate_config() -> bool:
 
     for line_key, path in IP_LIST_FILES.items():
         if not path or "/path/to/" in path:
-            errors.append(f"IP_LIST_FILES['{line_key}'] 未配置有效文件路径")
+            print(f"[警告] IP_LIST_FILES['{line_key}'] 未配置，该线路将被跳过")
 
     if errors:
         print("[错误] 配置验证失败，请检查 config.py:")
@@ -347,7 +347,7 @@ def process_line(
     处理单个线路的解析记录创建
 
     流程:
-    1. 从本地文件读取IP列表
+    1. 从本地文件读取IP列表（空路径则跳过）
     2. 检查IP数量是否足够（至少1个）
     3. 清理旧记录集
     4. 分块并去重
@@ -357,7 +357,7 @@ def process_line(
         line_key: 线路标识
         line_name: 线路中文名
         line_id: 华为云线路ID
-        file_path: IP列表文件路径
+        file_path: IP列表文件路径（空字符串则跳过该线路）
         fqdn: 完整域名
 
     Returns:
@@ -366,6 +366,11 @@ def process_line(
     print(f"\n{'='*60}")
     print(f"处理线路: {line_name} ({line_key}) -> 华为云线路ID: {line_id}")
     print(f"{'='*60}")
+
+    # 如果文件路径为空，直接跳过该线路，不做任何操作
+    if not file_path or "/path/to/" in file_path:
+        print(f"  [跳过] {line_name} 线路未配置文件路径，不做任何操作")
+        return True  # 视为成功（用户主动跳过）
 
     # ========== 第1步: 读取IP列表 ==========
     ips = read_ip_list(file_path, line_name)
